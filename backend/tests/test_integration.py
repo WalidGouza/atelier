@@ -28,6 +28,7 @@ def client(tmp_path, monkeypatch):
     Base.metadata.drop_all(engine)
     monkeypatch.setattr(main, "engine", engine)
     monkeypatch.setattr(main, "uploads", tmp_path)
+    monkeypatch.setattr(main.image_storage, "local", tmp_path)
 
     def fake_embed(value):
         return [1.0] + [0.0] * 511

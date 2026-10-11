@@ -7,20 +7,20 @@ import {
   Layers3,
   Bookmark,
   Shirt,
-  ChevronDown,
   Check,
   X,
   SlidersHorizontal,
   Search,
   ArrowRight,
   LogOut,
-  Heart,
   Menu,
   Sun,
   Moon,
   Monitor,
 } from "lucide-react";
 import "./style.css";
+import { useWardrobeCatalog } from "./useWardrobeCatalog";
+import { motion, AnimatePresence, MotionConfig } from "motion/react";
 import { resolveApiUrl, requestJson } from "./api";
 import { validTheme, resolvedTheme, type Theme } from "./theme";
 type Category = "tops" | "pants" | "shoes" | "jackets";
@@ -41,11 +41,15 @@ type Look = {
   score?: number;
   breakdown?: Record<string, number>;
 };
-type Wardrobe = { id: string; name: string };
 const rawApi = (import.meta as unknown as { env: Record<string, string> }).env
   .VITE_API_URL;
 // Configuration validation happens per request so an invalid URL cannot crash the UI.
 const API = (rawApi?.trim() || "/api").replace(/\/+$/, "");
+const loadWardrobes = (token: string, signal: AbortSignal) =>
+  requestJson(resolveApiUrl(rawApi) + "/wardrobes", {
+    headers: { Authorization: `Bearer ${token}` },
+    signal,
+  });
 const styles = ["Everyday", "Minimal", "Smart casual", "Streetwear", "Evening"];
 const seed: Cloth[] = [
   ["1", "The everyday tee", "tops", "#e9e5dc", "cotton"],
@@ -66,7 +70,10 @@ const seed: Cloth[] = [
 }));
 function Garment({ item }: { item: Cloth }) {
   const [url, setUrl] = useState("");
+  const [imageError, setImageError] = useState("");
   useEffect(() => {
+    setUrl("");
+    setImageError("");
     let active = true,
       object = "";
     if (item.image) {
@@ -76,14 +83,15 @@ function Garment({ item }: { item: Cloth }) {
         },
       })
         .then((r) => {
-          if (!r.ok) throw Error();
+          if (!r.ok) throw Error(r.status === 404 ? "Photo missing. Upload this piece again." : "Photo unavailable. Try again later.");
           return r.blob();
         })
         .then((b) => {
           object = URL.createObjectURL(b);
           if (active) setUrl(object);
+          else URL.revokeObjectURL(object);
         })
-        .catch(() => {});
+        .catch((error) => { if (active) setImageError(error instanceof Error && error.message.startsWith("Photo") ? error.message : "Photo unavailable. Try again later."); });
     }
     return () => {
       active = false;
@@ -92,9 +100,9 @@ function Garment({ item }: { item: Cloth }) {
   }, [item.image]);
   if (item.image)
     return url ? (
-      <img src={url} alt={item.name} />
+      <img src={url} alt={item.name} onError={() => { setUrl(""); setImageError("Photo unavailable. Try again later."); }} />
     ) : (
-      <span>Loading image…</span>
+      <span role={imageError ? "status" : undefined}>{imageError || "Loading image…"}</span>
     );
   const shape =
     item.category === "tops" ? (
@@ -168,12 +176,37 @@ function Garment({ item }: { item: Cloth }) {
   );
 }
 function App() {
+  const [keyboardMode, setKeyboardMode] = useState(false);
+  useEffect(() => {
+    const keyboard = () => {
+      setKeyboardMode(true);
+      document.documentElement.dataset.input = "keyboard";
+    };
+    const pointer = () => {
+      setKeyboardMode(false);
+      document.documentElement.dataset.input = "pointer";
+    };
+    window.addEventListener("keydown", keyboard);
+    window.addEventListener("pointerdown", pointer);
+    return () => {
+      window.removeEventListener("keydown", keyboard);
+      window.removeEventListener("pointerdown", pointer);
+    };
+  }, []);
   const [theme, setTheme] = useState<Theme>(() =>
     validTheme(localStorage.getItem("atelier-theme")),
   );
   useEffect(() => {
     const media = window.matchMedia("(prefers-color-scheme: dark)");
     const apply = () => {
+      document
+        .querySelector('meta[name="theme-color"]')
+        ?.setAttribute(
+          "content",
+          resolvedTheme(theme, media.matches) === "dark"
+            ? "#171917"
+            : "#f9f7f3",
+        );
       document.documentElement.dataset.theme = resolvedTheme(
         theme,
         media.matches,
@@ -193,15 +226,14 @@ function App() {
     sessionStorage.getItem("atelier-token") || "",
   );
   const demo = !token;
-  const [wardrobes, setWardrobes] = useState<Wardrobe[]>([
-    { id: "demo", name: "Everyday essentials" },
-    { id: "travel", name: "Weekend getaway" },
-  ]);
-  const [wid, setWid] = useState("demo");
-  const [clothes, setClothes] = useState<Cloth[]>(seed);
+  const catalog = useWardrobeCatalog(token, loadWardrobes);
+  const wardrobes = catalog.wardrobes;
+  const wid = catalog.selected;
+  const setWid = catalog.select;
+  const [clothes, setClothes] = useState<Cloth[]>(() => (token ? [] : seed));
   const [looks, setLooks] = useState<Look[]>([]);
   const [saved, setSaved] = useState<Look[]>(() =>
-    JSON.parse(localStorage.getItem("atelier-saved-demo") || "[]"),
+    token ? [] : JSON.parse(localStorage.getItem("atelier-saved-demo") || "[]"),
   );
   const [view, setView] = useState("studio");
   const [category, setCategory] = useState("all");
@@ -216,10 +248,16 @@ function App() {
   const [error, setError] = useState("");
   const [mobile, setMobile] = useState(false);
   const [register, setRegister] = useState(false);
-  async function request(path: string, method = "GET", body?: unknown) {
+  async function request(
+    path: string,
+    method = "GET",
+    body?: unknown,
+    signal?: AbortSignal,
+  ) {
     const base = resolveApiUrl(rawApi);
     return requestJson(base + path, {
       method,
+      signal,
       headers: {
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
         ...(body instanceof FormData
@@ -240,25 +278,11 @@ function App() {
     return () => clearTimeout(t);
   }, [notice]);
   useEffect(() => {
-    if (demo) return;
-    let active = true;
-    request("/wardrobes")
-      .then((ws) => {
-        if (active) {
-          setWardrobes(ws);
-          setWid(ws[0]?.id || "");
-          setClothes([]);
-          setSaved([]);
-        }
-      })
-      .catch((e) => setError(e.message));
-    return () => {
-      active = false;
-    };
-  }, [token]);
-  useEffect(() => {
     setAnchor("");
     setLooks([]);
+    setClothes([]);
+    setSaved([]);
+    setError("");
     if (demo) {
       setSaved(
         JSON.parse(localStorage.getItem(`atelier-saved-${wid}`) || "[]"),
@@ -270,23 +294,23 @@ function App() {
       );
       return;
     }
-    if (!wid) return;
-    let active = true;
+    if (!catalog.ready || !wid) return;
+    const controller = new AbortController();
     Promise.all([
-      request(`/wardrobes/${wid}/clothes`),
-      request(`/wardrobes/${wid}/outfits`),
+      request(`/wardrobes/${wid}/clothes`, "GET", undefined, controller.signal),
+      request(`/wardrobes/${wid}/outfits`, "GET", undefined, controller.signal),
     ])
       .then(([c, o]) => {
-        if (active) {
+        if (!controller.signal.aborted) {
           setClothes(c);
           setSaved(o);
         }
       })
-      .catch((e) => setError(e.message));
-    return () => {
-      active = false;
-    };
-  }, [wid, token]);
+      .catch((e) => {
+        if (!controller.signal.aborted) setError(e.message);
+      });
+    return () => controller.abort();
+  }, [wid, token, catalog.ready]);
   useEffect(() => {
     if (!modal) return;
     const prior = document.activeElement as HTMLElement;
@@ -399,11 +423,14 @@ function App() {
           { email: f.get("email"), password: f.get("password") },
         );
         sessionStorage.setItem("atelier-token", result.token);
+        setClothes([]);
+        setSaved([]);
+        setLooks([]);
+        setError("");
         setToken(result.token);
       } else if (modal === "wardrobe") {
         const w = await request("/wardrobes", "POST", { name: f.get("name") });
-        setWardrobes([...wardrobes, w]);
-        setWid(w.id);
+        catalog.add(w);
       } else {
         await request(`/wardrobes/${wid}/clothes`, "POST", f);
         setClothes(await request(`/wardrobes/${wid}/clothes`));
@@ -416,488 +443,446 @@ function App() {
       setBusy(false);
     }
   }
+  const displayedError = error || catalog.error;
   const visible = clothes.filter(
     (c) =>
       (category === "all" || category === c.category) &&
       c.name.toLowerCase().includes(search.toLowerCase()),
   );
   return (
-    <div className="shell">
-      <aside className={mobile ? "sidebar open" : "sidebar"}>
-        <a
-          className="brand"
-          href="#"
-          onClick={(e) => {
-            e.preventDefault();
-            setView("studio");
-          }}
-        >
-          <span className="brandmark">a</span>atelier
-          <span className="brand-dot">.</span>
-        </a>
-        <div className="nav-label">YOUR PERSONAL STYLING SPACE</div>
-        <nav>
-          {[
-            ["studio", "Outfit studio", Sparkles],
-            ["wardrobe", "My wardrobe", Shirt],
-            ["saved", "Saved outfits", Bookmark],
-          ].map(([key, label, Icon]) => {
-            const I = Icon as typeof Shirt;
-            return (
-              <button
-                className={view === key ? "nav-item selected" : "nav-item"}
-                key={key as string}
-                onClick={() => {
-                  setView(key as string);
-                  setMobile(false);
-                }}
-              >
-                <I size={19} />
-                {label as string}
-                {key === "saved" && (
-                  <span className="count">{saved.length}</span>
-                )}
-              </button>
-            );
-          })}
-        </nav>
-        <div className="wardrobe-label">
-          MY WARDROBES{" "}
+    <MotionConfig
+      reducedMotion="user"
+      transition={
+        keyboardMode
+          ? { duration: 0 }
+          : { type: "spring", bounce: 0, duration: 0.28 }
+      }
+    >
+      <div className="shell">
+        {mobile && (
           <button
-            aria-label="Create wardrobe"
-            onClick={() => setModal(demo ? "auth" : "wardrobe")}
-          >
-            <Plus size={16} />
-          </button>
-        </div>
-        {wardrobes.map((w) => (
+            className="sidebar-scrim"
+            aria-label="Close navigation"
+            onClick={() => setMobile(false)}
+          />
+        )}
+        <aside className={mobile ? "sidebar open" : "sidebar"}>
           <button
-            key={w.id}
-            className={`wardrobe-nav ${wid === w.id ? "current" : ""}`}
-            onClick={() => setWid(w.id)}
+            className="sidebar-close"
+            aria-label="Close navigation"
+            onClick={() => setMobile(false)}
           >
-            <span className="tiny-square" />
-            {w.name}
-            {wid === w.id && <Check size={14} />}
+            <X size={18} />
           </button>
-        ))}
-        <div className="side-tip">
-          <div className="tip-icon">
-            <Layers3 size={20} />
-          </div>
-          <h3>
-            Less guessing.
-            <br />
-            More getting dressed.
-          </h3>
-          <p>A fresh perspective on the pieces you already love.</p>
-        </div>
-        <button
-          className="profile"
-          onClick={() => {
-            if (demo) setModal("auth");
-            else {
-              sessionStorage.removeItem("atelier-token");
-              setToken("");
-              setWardrobes([
-                { id: "demo", name: "Everyday essentials" },
-                { id: "travel", name: "Weekend getaway" },
-              ]);
-              setWid("demo");
-              setSaved(
-                JSON.parse(localStorage.getItem("atelier-saved-demo") || "[]"),
-              );
-            }
-          }}
-        >
-          <span className="avatar">{demo ? "A" : "You"}</span>
-          <span>
-            {demo ? "Your styling space" : "My account"}
-            <small>{demo ? "Sample wardrobe · Sign in" : "Sign out"}</small>
-          </span>
-          {demo ? <ArrowUpRight size={16} /> : <LogOut size={16} />}
-        </button>
-      </aside>
-      <main>
-        <header>
-          <button
-            className="mobile-menu"
-            aria-label="Open menu"
-            onClick={() => setMobile(!mobile)}
+          <a
+            className="brand"
+            href="#"
+            onClick={(e) => {
+              e.preventDefault();
+              setView("studio");
+            }}
           >
-            <Menu />
-          </button>
-          <span className="breadcrumb">
-            Your space <span>/</span>{" "}
-            {view === "studio"
-              ? "Outfit studio"
-              : view === "saved"
-                ? "Saved outfits"
-                : "My wardrobe"}
-          </span>
-          <span className="header-right">
-            <label className="theme-picker">
-              {theme === "dark" ? (
-                <Moon size={15} />
-              ) : theme === "light" ? (
-                <Sun size={15} />
-              ) : (
-                <Monitor size={15} />
-              )}
-              <select
-                aria-label="Appearance"
-                value={theme}
-                onChange={(e) => setTheme(e.target.value as Theme)}
-              >
-                <option value="system">System</option>
-                <option value="light">Light</option>
-                <option value="dark">Dark</option>
-              </select>
-            </label>
-            <span className="status-dot" />
-            {demo ? "Explore sample wardrobe" : "Personal wardrobe"}
-            <button
-              className="icon-button"
-              aria-label="Sign in or manage account"
-              onClick={() => setModal("auth")}
-            >
-              <span className="mini-avatar">A</span>
-            </button>
-          </span>
-        </header>
-        <div className="content">
-          <div className="page-heading">
-            <div>
-              <div className="eyebrow">A LITTLE INSPIRATION, EVERY DAY</div>
-              <h1>
-                {view === "studio"
-                  ? "Good outfits start here."
-                  : view === "wardrobe"
-                    ? "Meet your wardrobe."
-                    : "Looks worth keeping."}
-              </h1>
-              <p>
-                {view === "studio"
-                  ? "Your clothes. New combinations. A style that feels like you."
-                  : view === "wardrobe"
-                    ? "A home for every piece, and the possibilities between them."
-                    : "Your favorite combinations, ready when you are."}
-              </p>
-            </div>
-            <button
-              className="button white"
-              onClick={() =>
-                setModal(demo ? "auth" : wid ? "upload" : "wardrobe")
-              }
-            >
-              <Plus size={17} /> Add a piece
-            </button>
-          </div>
-          {error && (
-            <div className="error" role="alert">
-              {error}
-              <button aria-label="Dismiss error" onClick={() => setError("")}>
-                <X size={16} />
-              </button>
-            </div>
-          )}
-          {view === "studio" && (
-            <section className="studio-panel">
-              <div className="studio-intro">
-                <span className="small-label">
-                  <Sparkles size={15} /> THE OUTFIT STUDIO
-                </span>
-                <h2>
-                  Make the most
-                  <br />
-                  of what you own.
-                </h2>
-                <p>
-                  Pick a mood. We’ll find the pieces
-                  <br />
-                  that come together effortlessly.
-                </p>
-                <div className="palette">
-                  <i style={{ background: "#7e8c70" }} />
-                  <i style={{ background: "#c1b295" }} />
-                  <i style={{ background: "#566675" }} />
-                  <i style={{ background: "#eee8da" }} />
-                  <span>A wardrobe of possibilities</span>
-                </div>
-              </div>
-              <div className="studio-controls">
-                <div className="control-header">
-                  <h3>What’s your mood today?</h3>
-                  <span>01 / MAKE IT YOURS</span>
-                </div>
-                <div className="style-buttons">
-                  {styles.map((x) => (
-                    <button
-                      className={style === x ? "active" : ""}
-                      onClick={() => setStyle(x)}
-                      key={x}
-                    >
-                      {x}
-                    </button>
-                  ))}
-                </div>
-                <div className="select-row">
-                  <label>
-                    Color direction
-                    <select
-                      value={harmony}
-                      onChange={(e) => setHarmony(e.target.value)}
-                    >
-                      <option value="balanced">A balanced palette</option>
-                      <option value="tonal">Soft & tonal</option>
-                      <option value="contrast">A little contrast</option>
-                    </select>
-                  </label>
-                  <label>
-                    Start with a piece
-                    <select
-                      value={anchor}
-                      onChange={(e) => setAnchor(e.target.value)}
-                    >
-                      <option value="">Surprise me</option>
-                      {clothes
-                        .filter((c) => jacket || c.category !== "jackets")
-                        .map((c) => (
-                          <option key={c.id} value={c.id}>
-                            {c.name}
-                          </option>
-                        ))}
-                    </select>
-                  </label>
-                </div>
-                <div className="generate-row">
-                  <label className="toggle-label">
-                    <input
-                      type="checkbox"
-                      checked={jacket}
-                      onChange={(e) => {
-                        setJacket(e.target.checked);
-                        if (
-                          !e.target.checked &&
-                          clothes.find((c) => c.id === anchor)?.category ===
-                            "jackets"
-                        )
-                          setAnchor("");
-                      }}
-                    />
-                    <span className="toggle" />
-                    Include a layer
-                  </label>
-                  <button
-                    className="button primary"
-                    disabled={busy || !wid}
-                    onClick={generate}
-                  >
-                    <Sparkles size={17} />
-                    {busy ? "Finding your outfits…" : "Create my outfits"}
-                    <ArrowRight size={17} />
-                  </button>
-                </div>
-              </div>
-            </section>
-          )}
-          {view === "studio" && looks.length > 0 && (
-            <section className="looks-section">
-              <div className="section-heading">
-                <div>
-                  <h2>Your next great outfit</h2>
-                  <p>
-                    {demo
-                      ? "Sample combinations · Sign in to match your uploaded pieces"
-                      : "Combinations from your wardrobe"}
-                  </p>
-                </div>
+            <span className="brandmark">a</span>atelier
+            <span className="brand-dot">.</span>
+          </a>
+          <div className="nav-label">THE PERSONAL STYLE STUDIO</div>
+          <nav>
+            {[
+              ["studio", "Outfit studio", Sparkles],
+              ["wardrobe", "My wardrobe", Shirt],
+              ["saved", "Saved outfits", Bookmark],
+            ].map(([key, label, Icon]) => {
+              const I = Icon as typeof Shirt;
+              return (
                 <button
-                  className="text-button"
-                  onClick={generate}
-                  disabled={busy}
+                  className={view === key ? "nav-item selected" : "nav-item"}
+                  key={key as string}
+                  onClick={() => {
+                    setView(key as string);
+                    setMobile(false);
+                  }}
                 >
-                  Refresh looks <Sparkles size={15} />
+                  {view === key && (
+                    <motion.span
+                      className="nav-indicator"
+                      layoutId="navigation"
+                      aria-hidden="true"
+                    />
+                  )}
+                  <I size={19} />
+                  {label as string}
+                  {key === "saved" && (
+                    <span className="count">{saved.length}</span>
+                  )}
+                </button>
+              );
+            })}
+          </nav>
+          <div className="wardrobe-label">
+            COLLECTIONS{" "}
+            <button
+              aria-label="Create wardrobe"
+              onClick={() => setModal(demo ? "auth" : "wardrobe")}
+            >
+              <Plus size={16} />
+            </button>
+          </div>
+          {wardrobes.map((w) => (
+            <button
+              key={w.id}
+              className={`wardrobe-nav ${wid === w.id ? "current" : ""}`}
+              onClick={() => {
+                setWid(w.id);
+                setMobile(false);
+              }}
+            >
+              <span className="tiny-square" />
+              {w.name}
+              {wid === w.id && <Check size={14} />}
+            </button>
+          ))}
+          <div className="side-tip">
+            <div className="tip-icon">
+              <Layers3 size={20} />
+            </div>
+            <h3>
+              Less guessing.
+              <br />
+              More getting dressed.
+            </h3>
+            <p>A fresh perspective on the pieces you already love.</p>
+          </div>
+          <button
+            className="profile"
+            onClick={() => {
+              if (demo) setModal("auth");
+              else {
+                sessionStorage.removeItem("atelier-token");
+                setToken("");
+                setSaved(
+                  JSON.parse(
+                    localStorage.getItem("atelier-saved-demo") || "[]",
+                  ),
+                );
+              }
+            }}
+          >
+            <span className="avatar">{demo ? "A" : "You"}</span>
+            <span>
+              {demo ? "Your styling space" : "My account"}
+              <small>{demo ? "Sample wardrobe · Sign in" : "Sign out"}</small>
+            </span>
+            {demo ? <ArrowUpRight size={16} /> : <LogOut size={16} />}
+          </button>
+        </aside>
+        <main>
+          <header>
+            <button
+              className="mobile-menu"
+              aria-label="Open menu"
+              onClick={() => setMobile(!mobile)}
+            >
+              <Menu />
+            </button>
+            <span className="breadcrumb">
+              Your space <span>/</span>{" "}
+              {view === "studio"
+                ? "Outfit studio"
+                : view === "saved"
+                  ? "Saved outfits"
+                  : "My wardrobe"}
+            </span>
+            <span className="header-right">
+              <label className="theme-picker">
+                {theme === "dark" ? (
+                  <Moon size={15} />
+                ) : theme === "light" ? (
+                  <Sun size={15} />
+                ) : (
+                  <Monitor size={15} />
+                )}
+                <select
+                  aria-label="Appearance"
+                  value={theme}
+                  onChange={(e) => setTheme(e.target.value as Theme)}
+                >
+                  <option value="system">System</option>
+                  <option value="light">Light</option>
+                  <option value="dark">Dark</option>
+                </select>
+              </label>
+              <span className="status-dot" />
+              {demo ? "Explore sample wardrobe" : "Personal wardrobe"}
+              <button
+                className="icon-button"
+                aria-label="Sign in or manage account"
+                onClick={() => setModal("auth")}
+              >
+                <span className="mini-avatar">A</span>
+              </button>
+            </span>
+          </header>
+          <div className="content">
+            <div className="page-heading">
+              <div>
+                <div className="eyebrow">YOUR CLOSET HAS MORE TO SAY</div>
+                <h1>
+                  {view === "studio" ? (
+                    <>
+                      Your wardrobe.
+                      <br />
+                      <em>New possibilities.</em>
+                    </>
+                  ) : view === "wardrobe" ? (
+                    <>
+                      The pieces.
+                      <br />
+                      <em>The possibilities.</em>
+                    </>
+                  ) : (
+                    <>
+                      Your favorites.
+                      <br />
+                      <em>Ready to repeat.</em>
+                    </>
+                  )}
+                </h1>
+                <p>
+                  {view === "studio"
+                    ? "Rediscover what you own. Find a combination that feels like you."
+                    : view === "wardrobe"
+                      ? "A home for every piece, and the possibilities between them."
+                      : "Your favorite combinations, ready when you are."}
+                </p>
+              </div>
+              <button
+                className="button white"
+                onClick={() =>
+                  setModal(demo ? "auth" : wid ? "upload" : "wardrobe")
+                }
+              >
+                <Plus size={17} /> Add a piece
+              </button>
+            </div>
+            <div className="workspace-strip">
+              <label className="collection-select">
+                <Layers3 size={17} />
+                <select
+                  aria-label="Current wardrobe"
+                  value={wid}
+                  onChange={(e) => setWid(e.target.value)}
+                >
+                  {!wardrobes.length && (
+                    <option value="">
+                      {catalog.loading
+                        ? "Loading wardrobes…"
+                        : "No wardrobes yet"}
+                    </option>
+                  )}
+                  {wardrobes.map((w) => (
+                    <option value={w.id} key={w.id}>
+                      {w.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="workspace-stats">
+                <span>
+                  <strong>{clothes.length}</strong> pieces
+                </span>
+                <span>
+                  <strong>
+                    {new Set(clothes.map((c) => c.category)).size}
+                  </strong>{" "}
+                  categories
+                </span>
+                <span>
+                  <strong>{saved.length}</strong> saved looks
+                </span>
+              </div>
+            </div>
+            {displayedError && (
+              <div className="error" role="alert">
+                {displayedError}
+                <button aria-label="Dismiss error" onClick={() => setError("")}>
+                  <X size={16} />
                 </button>
               </div>
-              <div className="look-grid">
-                {looks.map((look, i) => (
-                  <article className="look-card" key={i}>
-                    <div className="look-art">
-                      {look.items.map((c) => (
-                        <div key={c.id}>
-                          <Garment item={c} />
-                        </div>
-                      ))}
-                    </div>
-                    <div className="look-info">
-                      <div>
-                        <span className="small-label">
-                          {look.style.toUpperCase()}
-                        </span>
-                        <h3>
-                          {
-                            [
-                              "An easy kind of day",
-                              "Quiet confidence",
-                              "A fresh perspective",
-                              "Your everyday, elevated",
-                            ][i]
-                          }
-                        </h3>
-                        {look.score !== undefined && (
-                          <p>
-                            {look.score} / 100 compatibility · heuristic score
-                          </p>
-                        )}
-                      </div>
-                      <button
-                        className={`save-button ${isSaved(look) ? "is-saved" : ""}`}
-                        aria-label="Save outfit"
-                        onClick={() => save(look)}
-                      >
-                        {isSaved(look) ? (
-                          <Check size={18} />
-                        ) : (
-                          <Bookmark size={18} />
-                        )}
-                      </button>
-                    </div>
-                    <div className="look-names">
-                      {look.items.map((c) => c.name).join(" · ")}
-                    </div>
-                  </article>
-                ))}
-              </div>
-            </section>
-          )}
-          {view !== "saved" && (
-            <section className="wardrobe-section">
-              <div className="section-heading">
-                <div>
+            )}
+            {view === "studio" && (
+              <section className="studio-panel">
+                <div className="studio-intro">
+                  <div className="board-heading">
+                    <span className="small-label">THE STARTING POINT</span>
+                    <span className="board-dot" />
+                  </div>
                   <h2>
-                    {view === "studio"
-                      ? "Your wardrobe, at a glance"
-                      : "All your favorite pieces"}{" "}
-                    <span>{clothes.length} pieces</span>
+                    Already yours.
+                    <br />
+                    <em>Entirely different.</em>
                   </h2>
+                  <div
+                    className="wardrobe-board"
+                    aria-label="Pieces from your selected wardrobe"
+                  >
+                    {(
+                      ["tops", "pants", "shoes", "jackets"] as Category[]
+                    ).flatMap((cat) => {
+                      const piece =
+                        clothes.find(
+                          (c) => c.category === cat && c.id === anchor,
+                        ) || clothes.find((c) => c.category === cat);
+                      return piece
+                        ? [
+                            <div
+                              className={`board-piece board-${cat}`}
+                              key={piece.id}
+                            >
+                              <Garment item={piece} />
+                            </div>,
+                          ]
+                        : [];
+                    })}
+                    {clothes.length === 0 && (
+                      <div className="board-empty">
+                        <Shirt size={40} />
+                        <span>Add your first pieces</span>
+                      </div>
+                    )}
+                    <span className="board-label">
+                      FROM YOUR WARDROBE <ArrowUpRight size={14} />
+                    </span>
+                  </div>
                   <p>
-                    {wardrobes.find((w) => w.id === wid)?.name ||
-                      "Create your first wardrobe"}
-                    {demo ? " · Illustrated sample pieces" : ""}
+                    A few familiar pieces. A fresh way to put them together.
                   </p>
                 </div>
-                {view === "studio" ? (
+                <div className="studio-controls">
+                  <div className="control-header">
+                    <h3>Make it feel like you.</h3>
+                    <span>01 — THE DIRECTION</span>
+                  </div>
+                  <p className="controls-description">
+                    Choose a style, then let your wardrobe do the rest.
+                  </p>
+                  <span className="field-caption">YOUR STYLE</span>
+                  <div
+                    className="style-buttons"
+                    role="group"
+                    aria-label="Outfit style"
+                  >
+                    {styles.map((x) => (
+                      <button
+                        className={style === x ? "active" : ""}
+                        onClick={() => setStyle(x)}
+                        key={x}
+                        aria-pressed={style === x}
+                      >
+                        {style === x && (
+                          <motion.span
+                            layoutId="style-selection"
+                            className="selection-pill"
+                            aria-hidden="true"
+                          />
+                        )}
+                        <span>{x}</span>
+                      </button>
+                    ))}
+                  </div>
+                  <div className="select-row">
+                    <label>
+                      Color direction
+                      <select
+                        value={harmony}
+                        onChange={(e) => setHarmony(e.target.value)}
+                      >
+                        <option value="balanced">A balanced palette</option>
+                        <option value="tonal">Soft & tonal</option>
+                        <option value="contrast">A little contrast</option>
+                      </select>
+                    </label>
+                    <label>
+                      Start with a piece
+                      <select
+                        value={anchor}
+                        onChange={(e) => setAnchor(e.target.value)}
+                      >
+                        <option value="">Surprise me</option>
+                        {clothes
+                          .filter((c) => jacket || c.category !== "jackets")
+                          .map((c) => (
+                            <option key={c.id} value={c.id}>
+                              {c.name}
+                            </option>
+                          ))}
+                      </select>
+                    </label>
+                  </div>
+                  <div className="generate-row">
+                    <label className="toggle-label">
+                      <input
+                        type="checkbox"
+                        checked={jacket}
+                        onChange={(e) => {
+                          setJacket(e.target.checked);
+                          if (
+                            !e.target.checked &&
+                            clothes.find((c) => c.id === anchor)?.category ===
+                              "jackets"
+                          )
+                            setAnchor("");
+                        }}
+                      />
+                      <span className="toggle" />
+                      Include a layer
+                    </label>
+                    <button
+                      className="button primary"
+                      disabled={busy || !wid || (!demo && !catalog.ready)}
+                      aria-busy={busy}
+                      onClick={generate}
+                    >
+                      <Sparkles
+                        size={17}
+                        className={busy ? "generating-icon" : undefined}
+                      />
+                      {busy ? "Putting it together…" : "Find my next outfit"}
+                      <ArrowRight size={17} />
+                    </button>
+                  </div>
+                </div>
+              </section>
+            )}
+            {view === "studio" && looks.length > 0 && (
+              <section className="looks-section">
+                <div className="section-heading">
+                  <div>
+                    <h2>Your next great outfit</h2>
+                    <p>
+                      {demo
+                        ? "Sample combinations · Sign in to match your uploaded pieces"
+                        : "Combinations from your wardrobe"}
+                    </p>
+                  </div>
                   <button
                     className="text-button"
-                    onClick={() => setView("wardrobe")}
+                    onClick={generate}
+                    disabled={busy}
                   >
-                    View wardrobe <ArrowUpRight size={17} />
-                  </button>
-                ) : (
-                  <label className="search">
-                    <Search size={15} />
-                    <input
-                      aria-label="Search clothes"
-                      placeholder="Find a piece…"
-                      value={search}
-                      onChange={(e) => setSearch(e.target.value)}
-                    />
-                  </label>
-                )}
-              </div>
-              <div className="filter-bar">
-                <div className="category-tabs">
-                  {["all", "tops", "pants", "shoes", "jackets"].map((c) => (
-                    <button
-                      className={category === c ? "active" : ""}
-                      key={c}
-                      onClick={() => setCategory(c)}
-                    >
-                      {c === "all"
-                        ? "All pieces"
-                        : c[0].toUpperCase() + c.slice(1)}
-                    </button>
-                  ))}
-                </div>
-                <span className="filter-caption">
-                  <SlidersHorizontal size={15} /> Curated by you
-                </span>
-              </div>
-              <div className="clothes-grid">
-                {visible.map((c) => (
-                  <button
-                    className={`cloth-card ${anchor === c.id ? "anchored" : ""}`}
-                    key={c.id}
-                    onClick={() => {
-                      setAnchor(anchor === c.id ? "" : c.id);
-                      setView("studio");
-                      setNotice(
-                        anchor === c.id
-                          ? "Starting piece cleared"
-                          : `${c.name} selected as your starting piece`,
-                      );
-                    }}
-                  >
-                    <div className="cloth-art">
-                      <Garment item={c} />
-                      <span className="cloth-hover">
-                        {anchor === c.id ? (
-                          <Check size={16} />
-                        ) : (
-                          <Plus size={16} />
-                        )}
-                      </span>
-                    </div>
-                    <div className="cloth-info">
-                      <h3>{c.name}</h3>
-                      <div>
-                        <span>
-                          {c.texture[0].toUpperCase() + c.texture.slice(1)} ·{" "}
-                          {c.category}
-                        </span>
-                        <i style={{ background: c.color }} />
-                      </div>
-                    </div>
-                  </button>
-                ))}
-                <button
-                  className="add-card"
-                  onClick={() =>
-                    setModal(demo ? "auth" : wid ? "upload" : "wardrobe")
-                  }
-                >
-                  <span>
-                    <Plus size={23} />
-                  </span>
-                  <h3>A little room for more</h3>
-                  <p>Add a piece you love</p>
-                </button>
-              </div>
-            </section>
-          )}
-          {view === "saved" && (
-            <section className="saved-section">
-              {!saved.length ? (
-                <div className="empty">
-                  <Bookmark size={35} />
-                  <h2>Your collection starts with a look.</h2>
-                  <p>
-                    Create an outfit, then save your favorite combinations here.
-                  </p>
-                  <button
-                    className="button primary"
-                    onClick={() => setView("studio")}
-                  >
-                    Explore the studio <ArrowRight size={17} />
+                    Refresh looks <Sparkles size={15} />
                   </button>
                 </div>
-              ) : (
                 <div className="look-grid">
-                  {saved.map((l) => (
-                    <article className="look-card" key={l.id}>
+                  {looks.map((look, i) => (
+                    <motion.article
+                      className="look-card"
+                      key={i}
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      transition={{ duration: keyboardMode ? 0 : 0.2 }}
+                    >
                       <div className="look-art">
-                        {l.items.map((c) => (
+                        {look.items.map((c) => (
                           <div key={c.id}>
                             <Garment item={c} />
                           </div>
@@ -905,207 +890,415 @@ function App() {
                       </div>
                       <div className="look-info">
                         <div>
-                          <span className="small-label">{l.style}</span>
-                          <h3>{l.name}</h3>
+                          <span className="small-label">
+                            {look.style.toUpperCase()}
+                          </span>
+                          <h3>
+                            {
+                              [
+                                "An easy kind of day",
+                                "Quiet confidence",
+                                "A fresh perspective",
+                                "Your everyday, elevated",
+                              ][i]
+                            }
+                          </h3>
+                          {look.score !== undefined && (
+                            <p>
+                              {look.score} / 100 compatibility · heuristic score
+                            </p>
+                          )}
                         </div>
                         <button
-                          className="save-button"
-                          aria-label="Remove saved outfit"
-                          onClick={() => remove(l)}
+                          className={`save-button ${isSaved(look) ? "is-saved" : ""}`}
+                          aria-label="Save outfit"
+                          onClick={() => save(look)}
                         >
-                          <X size={18} />
+                          {isSaved(look) ? (
+                            <Check size={18} />
+                          ) : (
+                            <Bookmark size={18} />
+                          )}
                         </button>
                       </div>
                       <div className="look-names">
-                        {l.items.map((c) => c.name).join(" · ")}
+                        {look.items.map((c) => c.name).join(" · ")}
                       </div>
-                    </article>
+                    </motion.article>
                   ))}
                 </div>
-              )}
-            </section>
-          )}
-          <footer>
-            <span className="footer-spark">
-              <Sparkles size={14} /> A little less effort. A little more you.
-            </span>
-            <span>Made for your everyday.</span>
-          </footer>
-        </div>
-      </main>
-      {notice && (
-        <div className="toast" role="status">
-          <Check size={17} />
-          {notice}
-        </div>
-      )}
-      {modal && (
-        <dialog
-          onCancel={() => {
-            setModal("");
-            setError("");
-          }}
-          onClick={(e) => {
-            if (e.target === e.currentTarget) setModal("");
-          }}
-        >
-          <form onSubmit={submit}>
-            <button
-              type="button"
-              className="close"
-              aria-label="Close dialog"
-              onClick={() => {
-                setModal("");
-                setError("");
-              }}
-            >
-              <X size={20} />
-            </button>
-            <span className="small-label">YOUR ATELIER</span>
-            <h2>
-              {modal === "auth"
-                ? register
-                  ? "Make room for your style."
-                  : "Welcome to your wardrobe."
-                : modal === "wardrobe"
-                  ? "A wardrobe for every mood."
-                  : "Add something you love."}
-            </h2>
-            <p>
-              {modal === "auth"
-                ? "Your account is handled by the Python API, with Supabase storing the database. Keep the backend running while you sign in."
-                : modal === "wardrobe"
-                  ? "Give this collection a name."
-                  : "Use a clear photo of one garment. Confirm its color and fabric."}
-            </p>
-            {error && (
-              <div className="error" role="alert">
-                {error}
-              </div>
+              </section>
             )}
-            {modal === "auth" ? (
-              <>
+            {view !== "saved" && (
+              <section className="wardrobe-section">
+                <div className="section-heading">
+                  <div>
+                    <h2>
+                      {view === "studio"
+                        ? "Your wardrobe, at a glance"
+                        : "All your favorite pieces"}{" "}
+                      <span>{clothes.length} pieces</span>
+                    </h2>
+                    <p>
+                      {wardrobes.find((w) => w.id === wid)?.name ||
+                        "Create your first wardrobe"}
+                      {demo ? " · Illustrated sample pieces" : ""}
+                    </p>
+                  </div>
+                  {view === "studio" ? (
+                    <button
+                      className="text-button"
+                      onClick={() => setView("wardrobe")}
+                    >
+                      View wardrobe <ArrowUpRight size={17} />
+                    </button>
+                  ) : (
+                    <label className="search">
+                      <Search size={15} />
+                      <input
+                        aria-label="Search clothes"
+                        placeholder="Find a piece…"
+                        value={search}
+                        onChange={(e) => setSearch(e.target.value)}
+                      />
+                    </label>
+                  )}
+                </div>
+                <div className="filter-bar">
+                  <div className="category-tabs">
+                    {["all", "tops", "pants", "shoes", "jackets"].map((c) => (
+                      <button
+                        className={category === c ? "active" : ""}
+                        key={c}
+                        aria-pressed={category === c}
+                        onClick={() => setCategory(c)}
+                      >
+                        {category === c && (
+                          <motion.span
+                            layoutId="category-selection"
+                            className="selection-pill"
+                            aria-hidden="true"
+                          />
+                        )}
+                        <span>
+                          {c === "all"
+                            ? "All pieces"
+                            : c[0].toUpperCase() + c.slice(1)}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                  <span className="filter-caption">
+                    <SlidersHorizontal size={15} /> Choose a starting piece
+                  </span>
+                </div>
+                <div className="clothes-grid">
+                  {visible.map((c) => (
+                    <button
+                      aria-pressed={anchor === c.id}
+                      className={`cloth-card ${anchor === c.id ? "anchored" : ""}`}
+                      key={c.id}
+                      onClick={() => {
+                        setAnchor(anchor === c.id ? "" : c.id);
+                        setView("studio");
+                        setNotice(
+                          anchor === c.id
+                            ? "Starting piece cleared"
+                            : `${c.name} selected as your starting piece`,
+                        );
+                      }}
+                    >
+                      <div className="cloth-art">
+                        <Garment item={c} />
+                        <span className="cloth-hover">
+                          {anchor === c.id ? (
+                            <Check size={16} />
+                          ) : (
+                            <Plus size={16} />
+                          )}
+                        </span>
+                      </div>
+                      <div className="cloth-info">
+                        <h3>{c.name}</h3>
+                        <div>
+                          <span>
+                            {c.texture[0].toUpperCase() + c.texture.slice(1)} ·{" "}
+                            {c.category}
+                          </span>
+                          <i style={{ background: c.color }} />
+                        </div>
+                      </div>
+                    </button>
+                  ))}
+                  <button
+                    className="add-card"
+                    onClick={() =>
+                      setModal(demo ? "auth" : wid ? "upload" : "wardrobe")
+                    }
+                  >
+                    <span>
+                      <Plus size={23} />
+                    </span>
+                    <h3>Something new?</h3>
+                    <p>Give it a place here</p>
+                  </button>
+                </div>
+              </section>
+            )}
+            {view === "saved" && (
+              <section className="saved-section">
+                {!saved.length ? (
+                  <div className="empty">
+                    <Bookmark size={35} />
+                    <h2>Your collection starts with a look.</h2>
+                    <p>
+                      Create an outfit, then save your favorite combinations
+                      here.
+                    </p>
+                    <button
+                      className="button primary"
+                      onClick={() => setView("studio")}
+                    >
+                      Explore the studio <ArrowRight size={17} />
+                    </button>
+                  </div>
+                ) : (
+                  <div className="look-grid">
+                    {saved.map((l) => (
+                      <article className="look-card" key={l.id}>
+                        <div className="look-art">
+                          {l.items.map((c) => (
+                            <div key={c.id}>
+                              <Garment item={c} />
+                            </div>
+                          ))}
+                        </div>
+                        <div className="look-info">
+                          <div>
+                            <span className="small-label">{l.style}</span>
+                            <h3>{l.name}</h3>
+                          </div>
+                          <button
+                            className="save-button"
+                            aria-label="Remove saved outfit"
+                            onClick={() => remove(l)}
+                          >
+                            <X size={18} />
+                          </button>
+                        </div>
+                        <div className="look-names">
+                          {l.items.map((c) => c.name).join(" · ")}
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                )}
+              </section>
+            )}
+            <footer>
+              <span className="footer-spark">
+                <Sparkles size={14} /> A little less effort. A little more you.
+              </span>
+              <span>Made for your everyday.</span>
+            </footer>
+          </div>
+        </main>
+        <div className="toast-wrap">
+          <AnimatePresence>
+            {notice && (
+              <motion.div
+                className="toast"
+                role="status"
+                key={notice}
+                initial={{
+                  opacity: 0,
+                  y: keyboardMode ? 0 : 12,
+                  scale: keyboardMode ? 1 : 0.98,
+                }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: keyboardMode ? 0 : 8 }}
+                transition={{ duration: keyboardMode ? 0 : 0.18 }}
+              >
+                <span className="toast-check">
+                  <Check size={16} />
+                </span>
+                {notice}
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
+        {modal && (
+          <dialog
+            onCancel={() => {
+              setModal("");
+              setError("");
+            }}
+            onClick={(e) => {
+              if (e.target === e.currentTarget) setModal("");
+            }}
+          >
+            <motion.form
+              initial={{ opacity: 0, scale: keyboardMode ? 1 : 0.97 }}
+              animate={{ opacity: 1, scale: 1 }}
+              onSubmit={submit}
+            >
+              <button
+                type="button"
+                className="close"
+                aria-label="Close dialog"
+                onClick={() => {
+                  setModal("");
+                  setError("");
+                }}
+              >
+                <X size={20} />
+              </button>
+              <span className="small-label">YOUR ATELIER</span>
+              <h2>
+                {modal === "auth"
+                  ? register
+                    ? "Make room for your style."
+                    : "Welcome to your wardrobe."
+                  : modal === "wardrobe"
+                    ? "A wardrobe for every mood."
+                    : "Add something you love."}
+              </h2>
+              <p>
+                {modal === "auth"
+                  ? "A home for your clothes, and a fresh perspective on your style."
+                  : modal === "wardrobe"
+                    ? "Give this collection a name."
+                    : "Use a clear photo of one garment. Confirm its color and fabric."}
+              </p>
+              {displayedError && (
+                <div className="error" role="alert">
+                  {displayedError}
+                </div>
+              )}
+              {modal === "auth" ? (
+                <>
+                  <label>
+                    Email
+                    <input
+                      name="email"
+                      type="email"
+                      required
+                      autoComplete="email"
+                    />
+                  </label>
+                  <label>
+                    Password
+                    <input
+                      name="password"
+                      type="password"
+                      minLength={10}
+                      maxLength={128}
+                      required
+                      autoComplete={
+                        register ? "new-password" : "current-password"
+                      }
+                    />
+                  </label>
+                  <small>At least 10 characters</small>
+                </>
+              ) : (
                 <label>
-                  Email
+                  {" "}
+                  {modal === "wardrobe" ? "Wardrobe name" : "Piece name"}
                   <input
-                    name="email"
-                    type="email"
+                    name="name"
                     required
-                    autoComplete="email"
-                  />
-                </label>
-                <label>
-                  Password
-                  <input
-                    name="password"
-                    type="password"
-                    minLength={10}
-                    maxLength={128}
-                    required
-                    autoComplete={
-                      register ? "new-password" : "current-password"
+                    maxLength={80}
+                    placeholder={
+                      modal === "wardrobe"
+                        ? "Summer in the city"
+                        : "Relaxed linen shirt"
                     }
                   />
                 </label>
-                <small>At least 10 characters</small>
-              </>
-            ) : (
-              <label>
-                {" "}
-                {modal === "wardrobe" ? "Wardrobe name" : "Piece name"}
-                <input
-                  name="name"
-                  required
-                  maxLength={80}
-                  placeholder={
-                    modal === "wardrobe"
-                      ? "Summer in the city"
-                      : "Relaxed linen shirt"
-                  }
-                />
-              </label>
-            )}
-            {modal === "upload" && (
-              <>
-                <label className="upload-input">
-                  Photo
-                  <input
-                    name="image"
-                    type="file"
-                    accept="image/jpeg,image/png,image/webp"
-                    required
-                  />
-                  <small>JPG, PNG or WebP · up to 10 MB</small>
-                </label>
-                <div className="select-row">
-                  <label>
-                    Category
-                    <select name="category">
-                      {["tops", "pants", "shoes", "jackets"].map((c) => (
-                        <option key={c}>{c}</option>
-                      ))}
-                    </select>
+              )}
+              {modal === "upload" && (
+                <>
+                  <label className="upload-input">
+                    Photo
+                    <input
+                      name="image"
+                      type="file"
+                      accept="image/jpeg,image/png,image/webp"
+                      required
+                    />
+                    <small>JPG, PNG or WebP · up to 10 MB</small>
                   </label>
-                  <label>
-                    Texture
-                    <select name="texture">
-                      {[
-                        "cotton",
-                        "denim",
-                        "knit",
-                        "leather",
-                        "linen",
-                        "silk",
-                        "other",
-                      ].map((c) => (
-                        <option key={c}>{c}</option>
-                      ))}
-                    </select>
-                  </label>
-                </div>
-                <div className="select-row">
-                  <label>
-                    Style
-                    <select name="style">
-                      {styles.map((c) => (
-                        <option key={c}>{c}</option>
-                      ))}
-                    </select>
-                  </label>
-                  <label>
-                    Main garment color
-                    <input type="color" name="color" defaultValue="#8b927a" />
-                  </label>
-                </div>
-              </>
-            )}
-            <button className="button primary wide" disabled={busy}>
-              {busy
-                ? "Please wait…"
-                : modal === "auth"
-                  ? register
-                    ? "Create account"
-                    : "Sign in"
-                  : modal === "wardrobe"
-                    ? "Create wardrobe"
-                    : "Add to wardrobe"}
-              <ArrowRight size={17} />
-            </button>
-            {modal === "auth" && (
-              <button
-                className="text-button auth-switch"
-                type="button"
-                onClick={() => setRegister(!register)}
-              >
-                {register
-                  ? "Already have an account? Sign in"
-                  : "New here? Create an account"}
+                  <div className="select-row">
+                    <label>
+                      Category
+                      <select name="category">
+                        {["tops", "pants", "shoes", "jackets"].map((c) => (
+                          <option key={c}>{c}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      Texture
+                      <select name="texture">
+                        {[
+                          "cotton",
+                          "denim",
+                          "knit",
+                          "leather",
+                          "linen",
+                          "silk",
+                          "other",
+                        ].map((c) => (
+                          <option key={c}>{c}</option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+                  <div className="select-row">
+                    <label>
+                      Style
+                      <select name="style">
+                        {styles.map((c) => (
+                          <option key={c}>{c}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      Main garment color
+                      <input type="color" name="color" defaultValue="#8b927a" />
+                    </label>
+                  </div>
+                </>
+              )}
+              <button className="button primary wide" disabled={busy}>
+                {busy
+                  ? "Please wait…"
+                  : modal === "auth"
+                    ? register
+                      ? "Create account"
+                      : "Sign in"
+                    : modal === "wardrobe"
+                      ? "Create wardrobe"
+                      : "Add to wardrobe"}
+                <ArrowRight size={17} />
               </button>
-            )}
-          </form>
-        </dialog>
-      )}
-    </div>
+              {modal === "auth" && (
+                <button
+                  className="text-button auth-switch"
+                  type="button"
+                  onClick={() => setRegister(!register)}
+                >
+                  {register
+                    ? "Already have an account? Sign in"
+                    : "New here? Create an account"}
+                </button>
+              )}
+            </motion.form>
+          </dialog>
+        )}
+      </div>
+    </MotionConfig>
   );
 }
 createRoot(document.getElementById("root")!).render(

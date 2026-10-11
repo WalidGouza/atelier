@@ -2,15 +2,15 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
-from uuid import uuid4
 from typing import Literal
 import warnings
+import logging
 import jwt
 from PIL import Image, ImageOps, UnidentifiedImageError
 from pwdlib import PasswordHash
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form
 from fastapi.security import HTTPBearer
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import Response, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy import create_engine, select, text
@@ -21,6 +21,7 @@ from .database import make_engine
 from .models import Base, User, Wardrobe, Cloth, Outfit
 from .embeddings import embed
 from .matching import rank
+from .storage import ImageStorage, StorageUnavailable
 
 Image.MAX_IMAGE_PIXELS = 16_000_000
 s = settings()
@@ -28,11 +29,14 @@ engine = make_engine(s.database_url)
 passwords = PasswordHash.recommended()
 bearer = HTTPBearer()
 uploads = Path(s.upload_dir).resolve()
+image_storage = ImageStorage(s)
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app):
-    uploads.mkdir(parents=True, exist_ok=True)
+    if not image_storage.remote:
+        uploads.mkdir(parents=True, exist_ok=True)
     with engine.begin() as conn:
         conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
     Base.metadata.create_all(engine)
@@ -52,6 +56,12 @@ app.add_middleware(
     allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["Authorization", "Content-Type"],
 )
+
+
+@app.exception_handler(StorageUnavailable)
+async def storage_error(request, exc):
+    logger.error("Image storage failed: %s", exc)
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
 
 
 @app.exception_handler(SQLAlchemyError)
@@ -204,12 +214,13 @@ def upload(
     try:
         vector = embed(im)
     except Exception as exc:
+        logger.exception("Image embedding failed")
         raise HTTPException(
             503, "Image model unavailable. Check model download and server logs."
         ) from exc
-    filename = f"{uuid4()}.jpg"
-    path = uploads / filename
-    im.save(path, quality=90)
+    jpeg = BytesIO()
+    im.save(jpeg, format="JPEG", quality=90)
+    filename = image_storage.save(jpeg.getvalue())
     c = Cloth(
         wardrobe_id=wid,
         name=name,
@@ -225,7 +236,10 @@ def upload(
         session.commit()
     except Exception:
         session.rollback()
-        path.unlink(missing_ok=True)
+        try:
+            image_storage.delete(filename)
+        except Exception:
+            logger.error("Image cleanup failed after database rollback")
         raise
     return cloth_json(c)
 
@@ -239,7 +253,11 @@ def get_image(filename: str, u=Depends(user), session=Depends(db)):
     )
     if not c:
         raise HTTPException(404, "Image not found")
-    return FileResponse(uploads / c.image, media_type="image/jpeg")
+    try:
+        jpeg = image_storage.read(c.image)
+    except FileNotFoundError:
+        raise HTTPException(404, "Photo unavailable. The stored file is missing; upload the photo again.") from None
+    return Response(jpeg, media_type="image/jpeg", headers={"Cache-Control": "private, no-store"})
 
 
 class Generate(BaseModel):

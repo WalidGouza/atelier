@@ -29,7 +29,8 @@ export async function requestJson(
   let response: Response;
   try {
     response = await transport(url, options);
-  } catch {
+  } catch (error) {
+    if (options.signal?.aborted) throw error;
     throw new Error(
       `Cannot reach the Python API at ${url.split("/auth/")[0]}. Start FastAPI, check VITE_API_URL and FRONTEND_ORIGINS, and use HTTPS for the API if the frontend uses HTTPS.`,
     );

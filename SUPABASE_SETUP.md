@@ -1,6 +1,6 @@
 # Supabase setup and account request troubleshooting
 
-Atelier uses Supabase as a PostgreSQL database. Registration and login still go through the separately running Python API. This app uses its own `public.users` table and JWT authentication, not Supabase Auth. No Supabase JavaScript client, anon key, or service-role key is required by this architecture.
+Atelier uses Supabase as a PostgreSQL database. Registration and login still go through the separately running Python API. This app uses its own `public.users` table and JWT authentication, not Supabase Auth. Database-only setup needs no Supabase JavaScript client or API key. Durable photo storage on Render additionally uses a private Supabase Storage bucket and a backend-only service_role key; see [RENDER_STORAGE_FIX.md](RENDER_STORAGE_FIX.md).
 
 ## Configure the backend
 

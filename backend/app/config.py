@@ -1,5 +1,7 @@
 import json
 from functools import lru_cache
+from typing import Literal
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -9,6 +11,10 @@ class Settings(BaseSettings):
     frontend_origin: str = "http://localhost:5173"
     frontend_origins: str = ""
     upload_dir: str = "uploads"
+    image_storage: Literal["local", "supabase"] = "local"
+    supabase_url: str = ""
+    supabase_service_role_key: SecretStr = SecretStr("")
+    supabase_storage_bucket: str = "wardrobe-images"
     embedding_model: str = "sentence-transformers/clip-ViT-B-32"
     business_rules_json: str
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")

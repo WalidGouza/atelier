@@ -1,8 +1,10 @@
 # Atelier
 
-A wardrobe and outfit creator with a separate React/TypeScript frontend and Python/FastAPI backend. The interface uses a restrained sage palette, garment illustrations, immediate press feedback, keyboard focus states, responsive layouts, and reduced-motion support.
+A wardrobe and outfit creator with a separate React/TypeScript frontend and Python/FastAPI backend. The redesigned interface uses warm ivory and charcoal surfaces, coral accents, editorial typography, a wardrobe outfit board, and larger garment previews. Motion provides spring-based selection markers, outfit reveals, dialog entry, and save feedback. Keyboard-triggered transitions are instant and operating-system reduced-motion preferences are respected.
 
 ## Run the app
+
+For Render/Vercel deployment and durable Supabase photo storage, follow [RENDER_STORAGE_FIX.md](RENDER_STORAGE_FIX.md). The default local upload folder is for development; hosted uploads need persistent storage.
 
 Prerequisites: Python 3.12+, Node 22.18+, and Docker Compose (or an existing PostgreSQL installation with pgvector). The CLIP model needs a first-time download from Hugging Face. CPU inference is supported; download and dependency sizes depend on your platform.
 
@@ -61,7 +63,7 @@ Photo embeddings are automatic. Category, texture, and color are user-confirmed 
 
 ## Appearance and Supabase
 
-The header appearance selector supports Light, Dark, and System. Preferences persist in this browser; System responds to operating-system theme changes. Dark mode covers navigation, garment cards, outfit cards, uploads, auth dialogs, native form controls, and feedback.
+The header appearance selector supports Light, Dark, and System. A wardrobe selector and live collection counts appear above the styling board. The mobile menu includes an outside-click backdrop and close control. Preferences persist in this browser; System responds to operating-system theme changes. Dark mode covers navigation, garment cards, outfit cards, uploads, auth dialogs, native form controls, and feedback.
 
 For an existing Supabase database and account request errors, follow [SUPABASE_SETUP.md](SUPABASE_SETUP.md). Supabase stores the database while FastAPI handles this app’s authentication.
 
@@ -129,3 +131,9 @@ Verified during creation: TypeScript/Vite production build and matching/authoriz
 ## Deployment scope
 
 This is a self-hosted development project with separately runnable applications. The database and Python service are not hosted by the included frontend build. Deploy the API with HTTPS, configure `FRONTEND_ORIGIN` and `VITE_API_URL`, and rebuild the frontend for its API URL. Keep `.env` server-side; back up both PostgreSQL data and uploaded images. The included database password is for local development. Before exposing registration publicly, add rate limiting, account recovery, operational monitoring, and a migration workflow. Initial schema creation is currently handled by SQLAlchemy at startup.
+
+Motion implementation reference: https://motion.dev/docs/react-motion-config
+
+## Sign-in loading fix
+
+Authenticated catalogs are scoped to the current login token. Clothing and saved-outfit requests wait until the catalog loads and a real wardrobe is selected. The sample IDs are used only in signed-out sample mode. Session and selection changes abort obsolete requests and ignore their results/errors. To apply this update, replace the frontend source and package files, preserve frontend `.env`, run `npm ci`, then restart the development server (or build and redeploy the frontend). No backend/database migration is required.

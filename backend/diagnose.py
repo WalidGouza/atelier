@@ -16,6 +16,7 @@ def main():
         return 1
     print("OK: backend .env parsed and matching rules validated.")
     print("OK: explicit frontend CORS origins configured.")
+    print("INFO: these checks do not test image storage or download/run the CLIP model. Verify an authenticated upload separately.")
     try:
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))

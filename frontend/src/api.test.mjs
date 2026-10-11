@@ -26,3 +26,8 @@ test('theme preference and OS fallback',()=>{
  assert.equal(resolvedTheme('system',true),'dark');assert.equal(resolvedTheme('system',false),'light');
  assert.equal(resolvedTheme('light',true),'light');assert.equal(resolvedTheme('dark',false),'dark');
 });
+test('cancelled requests preserve abort errors instead of connectivity messages',async()=>{
+ const controller=new AbortController();controller.abort();
+ const cancellation=new DOMException('Request cancelled','AbortError');
+ await assert.rejects(()=>requestJson('/api/wardrobes/demo/clothes',{signal:controller.signal},async()=>{throw cancellation}),error=>error===cancellation);
+});
